@@ -5,14 +5,169 @@ import json
 import os
 import shutil
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import glob
 
 import boto3  # type: ignore  # missing stubs
 import pyvips  # type: ignore  # missing stubs
 from dotenv import load_dotenv
+from mozjpeg_lossless_optimization import optimize  # type: ignore  # missing stubs
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def optimize_single_jpeg(jpeg_file: Path) -> Tuple[Path, int]:
+    """
+    Optimize a single JPEG file using mozjpeg.
+
+    Args:
+        jpeg_file: Path to the JPEG file
+
+    Returns:
+        Tuple of (file path, bytes saved)
+    """
+    original_size = os.path.getsize(jpeg_file)
+    with open(jpeg_file, "rb") as f:
+        optimized_data = optimize(f.read())
+
+    if len(optimized_data) < original_size:
+        with open(jpeg_file, "wb") as f:
+            f.write(optimized_data)
+        return jpeg_file, original_size - len(optimized_data)
+    return jpeg_file, 0
+
+
+def optimize_jpeg_tiles(
+    directory: str, max_workers: int = 4, show_progress: bool = True
+) -> None:
+    """
+    Optimize all JPEG files in a directory tree using mozjpeg with parallel processing.
+
+    Args:
+        directory: Root directory containing JPEG files to optimize
+        max_workers: Number of parallel optimization workers
+        show_progress: Whether to show progress bars
+    """
+    # Get list of all jpg files
+    jpeg_files = list(Path(directory).rglob("*.jpg"))
+    total_saved = 0
+    processed_files = 0
+
+    # Create progress bar
+    pbar = tqdm(
+        total=len(jpeg_files), desc="Optimizing tiles", disable=not show_progress
+    )
+
+    # Process files in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all optimization jobs
+        future_to_file = {
+            executor.submit(optimize_single_jpeg, jpeg_file): jpeg_file
+            for jpeg_file in jpeg_files
+        }
+
+        # Process results as they complete
+        for future in as_completed(future_to_file):
+            file_path, saved = future.result()
+            total_saved += saved
+            processed_files += 1
+            if saved > 0:
+                pbar.write(f"Optimized {file_path.name}: saved {saved/1024:.1f}KB")
+            pbar.update(1)
+
+    pbar.close()
+    print(
+        f"Processed {processed_files} files. "
+        f"Total space saved: {total_saved/1024/1024:.1f}MB"
+    )
+
+
+def load_metadata(directory: str) -> Tuple[str, Dict[str, Any], str]:
+    """
+    Load GeoTIFF and metadata files from directory.
+
+    Args:
+        directory: Path to directory containing .tif and .json files
+
+    Returns:
+        Tuple of (tiff_path, metadata_dict, base_name)
+    """
+    # Find the first .tif file
+    tiff_files = glob.glob(os.path.join(directory, "*.tif"))
+    if not tiff_files:
+        raise FileNotFoundError(f"No .tif file found in {directory}")
+    tiff_path = tiff_files[0]
+
+    # Find the first .json file
+    json_files = glob.glob(os.path.join(directory, "*.json"))
+    if not json_files:
+        raise FileNotFoundError(f"No .json file found in {directory}")
+
+    # Load the metadata
+    with open(json_files[0], "r") as f:
+        metadata = json.load(f)
+
+    # Get base name from the directory
+    base_name = os.path.basename(directory)
+
+    return tiff_path, metadata, base_name
+
+
+def enhance_manifest_with_metadata(
+    manifest: Dict[str, Any], metadata: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Enhance IIIF manifest with OpenGeoMetadata fields.
+
+    Args:
+        manifest: Original IIIF manifest
+        metadata: OpenGeoMetadata record
+
+    Returns:
+        Enhanced IIIF manifest
+    """
+    # Update basic fields
+    manifest["label"] = metadata.get("dct_title_s", manifest["label"])
+
+    # Build rich metadata array
+    iiif_metadata = []
+
+    # Map OpenGeoMetadata fields to IIIF metadata labels
+    field_mappings = {
+        "dct_description_sm": "Description",
+        "dct_publisher_sm": "Publisher",
+        "schema_provider_s": "Provider",
+        "gbl_resourceClass_sm": "Resource Class",
+        "gbl_resourceType_sm": "Resource Type",
+        "dct_temporal_sm": "Temporal Coverage",
+        "dct_issued_s": "Date Issued",
+        "dct_spatial_sm": "Spatial Coverage",
+        "dct_format_s": "Format",
+        "geomg_id_s": "Identifier",
+        "dct_language_sm": "Language",
+    }
+
+    for field, label in field_mappings.items():
+        value = metadata.get(field)
+        if value:
+            if isinstance(value, list):
+                value = "; ".join(str(v) for v in value)
+            iiif_metadata.append({"label": label, "value": value})
+
+    # Add spatial extent if available
+    if "locn_geometry" in metadata:
+        iiif_metadata.append(
+            {"label": "Geographic Extent", "value": metadata["locn_geometry"]}
+        )
+
+    # Update manifest metadata
+    manifest["metadata"] = iiif_metadata
+
+    return manifest
 
 
 def convert_geotiff_to_iiif(
@@ -20,6 +175,8 @@ def convert_geotiff_to_iiif(
     output_dir: str,
     bucket_name: str,
     s3_prefix: str,
+    metadata: Dict[str, Any],  # Add metadata parameter
+    base_name: str,  # Add base_name parameter
     region_name: str = "us-east-1",
     endpoint_url: Optional[str] = None,
     aws_access_key_id: Optional[str] = None,
@@ -28,6 +185,9 @@ def convert_geotiff_to_iiif(
     title: str = "My GeoTIFF as IIIF",
     creator: str = "Unknown",
     tile_and_upload: bool = True,
+    jpeg_quality: int = 80,
+    optimization_workers: int = 4,
+    show_progress: bool = True,
 ) -> Dict[str, Any]:
     """
     1) Converts a GeoTIFF to IIIF-compliant tile folders (static).
@@ -49,6 +209,9 @@ def convert_geotiff_to_iiif(
         title: Title of the work in the IIIF Manifest.
         creator: Creator/attribution in the IIIF Manifest.
         tile_and_upload: Whether to tile and upload images.
+        jpeg_quality: JPEG quality (1-100, default: 80)
+        optimization_workers: Number of parallel optimization workers (default: 4)
+        show_progress: Whether to show progress bars
 
     Returns:
         A Python dict representing the IIIF Manifest.
@@ -74,7 +237,6 @@ def convert_geotiff_to_iiif(
     # Depending on your GeoTIFF, you may need to specify `n=-1` or
     # other options to handle multi-band data.
 
-    base_name = os.path.splitext(os.path.basename(input_geotiff))[0]
     dz_output_folder = os.path.join(output_dir, base_name)
 
     # Load the image regardless of the tile_and_upload flag
@@ -101,8 +263,17 @@ def convert_geotiff_to_iiif(
             suffix=".jpg",  # tile format (JPEG)
             overlap=0,  # overlap in pixels between tiles
             tile_size=256,  # typical tile size for IIIF
+            Q=jpeg_quality,  # JPEG quality from parameter
+            strip=True,  # Remove EXIF metadata
         )
         print(f"IIIF tiles created at: {dz_output_folder}")
+
+        print(f"Optimizing JPEG tiles with mozjpeg...")
+        optimize_jpeg_tiles(
+            dz_output_folder,
+            max_workers=optimization_workers,
+            show_progress=show_progress,
+        )
 
         # Modify the info.json file to use the correct @id
         info_json_path = os.path.join(dz_output_folder, "info.json")
@@ -174,11 +345,12 @@ def convert_geotiff_to_iiif(
     canvas_id = f"{manifest_id}/canvas/p1"
     image_annotation_id = f"{canvas_id}/image"
 
+    # Create manifest with metadata
     manifest = {
         "@context": "http://iiif.io/api/presentation/2/context.json",
         "@type": "sc:Manifest",
         "@id": manifest_id,
-        "label": title,
+        "label": metadata.get("dct_title_s", "Untitled"),  # Use title from metadata
         "metadata": [{"label": "Creator", "value": creator}],
         "sequences": [
             {
@@ -215,6 +387,9 @@ def convert_geotiff_to_iiif(
             }
         ],
     }
+
+    # Enhance manifest with metadata
+    manifest = enhance_manifest_with_metadata(manifest, metadata)
 
     # Save the manifest
     manifest_path = os.path.join(dz_output_folder, "manifest.json")
@@ -283,15 +458,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert GeoTIFF to IIIF tiles and upload to S3."
     )
-    parser.add_argument("input_geotiff", help="Path to the input GeoTIFF file.")
     parser.add_argument(
-        "--tile_and_upload", action="store_true", help="Tile and upload images if set."
+        "input_directory", help="Directory containing GeoTIFF and metadata JSON files"
+    )
+    parser.add_argument(
+        "--tile_and_upload", action="store_true", help="Tile and upload images if set"
+    )
+    parser.add_argument(
+        "--jpeg-quality", type=int, default=80, help="JPEG quality (1-100, default: 80)"
+    )
+    parser.add_argument(
+        "--optimization-workers",
+        type=int,
+        default=4,
+        help="Number of parallel optimization workers (default: 4)",
+    )
+    parser.add_argument(
+        "--no-progress", action="store_true", help="Disable progress bars"
     )
     args = parser.parse_args()
 
     # Example usage
     # Adjust these variables to match your environment
-    INPUT_GEOTIFF = args.input_geotiff
+    INPUT_DIRECTORY = args.input_directory
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output_tiles")
     BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "my-iiif-bucket")
     AWS_S3_PREFIX = os.getenv("AWS_S3_PREFIX", "my_geotiff")
@@ -304,16 +493,22 @@ if __name__ == "__main__":
     AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
     REGION_NAME = os.getenv("AWS_REGION", "us-east-1")
 
+    # Load files from directory
+    tiff_path, metadata, base_name = load_metadata(INPUT_DIRECTORY)
+
     convert_geotiff_to_iiif(
-        input_geotiff=INPUT_GEOTIFF,
+        input_geotiff=tiff_path,
         output_dir=OUTPUT_DIR,
         bucket_name=BUCKET_NAME,
         s3_prefix=AWS_S3_PREFIX,
+        metadata=metadata,
+        base_name=base_name,
         region_name=REGION_NAME,
         aws_access_key_id=AWS_ACCESS_KEY,
         aws_secret_access_key=AWS_SECRET_KEY,
         iiif_base_url=AWS_IIIF_BASE_URL,
-        title="Sample GeoTIFF",
-        creator="ACME Drones",
         tile_and_upload=args.tile_and_upload,
+        jpeg_quality=args.jpeg_quality,
+        optimization_workers=args.optimization_workers,
+        show_progress=not args.no_progress,
     )

@@ -67,3 +67,4 @@ tzdata==2025.1
 urllib3>=1.25.4,<1.27
 uvicorn==0.32.1
 yarl==1.18.3
+mozjpeg-lossless-optimization==1.1.0
