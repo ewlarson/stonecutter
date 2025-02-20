@@ -1,4 +1,5 @@
-# GeoTIFF to AWS S3 IIIF Image API Converter
+# STONECUTTER
+## GeoTIFF to AWS S3 IIIF Image API Converter
 
 This script converts GeoTIFF files to IIIF-compliant image tiles and uploads them to Amazon S3.
 
