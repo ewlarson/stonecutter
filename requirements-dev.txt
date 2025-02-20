@@ -1,0 +1,4 @@
+black==24.2.0
+ruff==0.3.0
+mypy==1.8.0
+types-boto3==1.0.2 

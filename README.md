@@ -68,3 +68,47 @@ python main.py sample.tif --tile_and_upload
 - Files are uploaded with public-read ACL to S3
 - Make sure your S3 bucket has appropriate permissions and CORS settings
 - The output directory (output_tiles) is cleaned before each run
+
+## Development
+
+### Code Quality Tools
+
+This project uses several tools to maintain code quality:
+
+1. **Black** - Code formatter
+   - Automatically formats Python code to a consistent style
+   - Run manually: `black .`
+
+2. **Ruff** - Fast Python linter
+   - Checks code for errors and style violations
+   - Run manually: `ruff check .`
+   - Auto-fix issues: `ruff check --fix .`
+
+3. **MyPy** - Static type checker
+   - Verifies type hints and catches type-related errors
+   - Run manually: `mypy .`
+
+### Setting Up Development Environment
+
+1. Install development dependencies:
+   ```
+   pip install -r requirements-dev.txt
+   ```
+
+2. Install pre-commit hooks:
+   ```
+   pip install pre-commit
+   pre-commit install
+   ```
+
+The pre-commit hooks will automatically:
+- Format code using Black
+- Run Ruff linter
+- Check types with MyPy
+- Fix trailing whitespace and file endings
+- Verify YAML files
+- Check for large files
+
+### Running Code Quality Checks
+
+You can run all checks manually:

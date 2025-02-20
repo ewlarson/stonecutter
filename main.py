@@ -1,54 +1,57 @@
 #!/usr/bin/env python3
 
+import argparse
+import json
 import os
 import shutil
-import json
-import boto3
-import pyvips
-from dotenv import load_dotenv
-import argparse
 import sys
+from typing import Any, Dict, Optional
+
+import boto3  # type: ignore  # missing stubs
+import pyvips  # type: ignore  # missing stubs
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
+
 def convert_geotiff_to_iiif(
-    input_geotiff,
-    output_dir,
-    bucket_name,
-    s3_prefix,
-    region_name="us-east-1",
-    endpoint_url=None,
-    aws_access_key_id=None,
-    aws_secret_access_key=None,
-    iiif_base_url=None,
-    title="My GeoTIFF as IIIF",
-    creator="Unknown",
-    tile_and_upload=True
-):
+    input_geotiff: str,
+    output_dir: str,
+    bucket_name: str,
+    s3_prefix: str,
+    region_name: str = "us-east-1",
+    endpoint_url: Optional[str] = None,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None,
+    iiif_base_url: Optional[str] = None,
+    title: str = "My GeoTIFF as IIIF",
+    creator: str = "Unknown",
+    tile_and_upload: bool = True,
+) -> Dict[str, Any]:
     """
     1) Converts a GeoTIFF to IIIF-compliant tile folders (static).
     2) Uploads files to S3 under s3://bucket_name/s3_prefix/.
     3) Generates a minimal IIIF Presentation API Manifest (JSON).
-    
+
     Args:
-        input_geotiff (str): Path to input GeoTIFF file.
-        output_dir (str): Local output folder for IIIF tiles.
-        bucket_name (str): Name of the S3 bucket.
-        s3_prefix (str): Prefix (folder path in S3) for uploaded files.
-        region_name (str): AWS region (default "us-east-1").
-        endpoint_url (str): Optional custom endpoint (e.g., for S3-compatible storage).
-        aws_access_key_id (str): AWS access key.
-        aws_secret_access_key (str): AWS secret key.
-        iiif_base_url (str): Base HTTPS URL that points to your S3 tile root
+        input_geotiff: Path to input GeoTIFF file.
+        output_dir: Local output folder for IIIF tiles.
+        bucket_name: Name of the S3 bucket.
+        s3_prefix: Prefix (folder path in S3) for uploaded files.
+        region_name: AWS region (default "us-east-1").
+        endpoint_url: Optional custom endpoint (e.g., for S3-compatible storage).
+        aws_access_key_id: AWS access key.
+        aws_secret_access_key: AWS secret key.
+        iiif_base_url: Base HTTPS URL that points to your S3 tile root
             (e.g. https://<bucket>.s3.amazonaws.com/<prefix>).
             This is used in the manifest to reference the tiles.
-        title (str): Title of the work in the IIIF Manifest.
-        creator (str): Creator/attribution in the IIIF Manifest.
-        tile_and_upload (bool): Whether to tile and upload images.
-    
+        title: Title of the work in the IIIF Manifest.
+        creator: Creator/attribution in the IIIF Manifest.
+        tile_and_upload: Whether to tile and upload images.
+
     Returns:
-        dict: A Python dict representing the IIIF Manifest.
+        A Python dict representing the IIIF Manifest.
     """
 
     # ------------------------------------------------------------------
@@ -81,7 +84,7 @@ def convert_geotiff_to_iiif(
     session = boto3.session.Session(
         region_name=region_name,
         aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key
+        aws_secret_access_key=aws_secret_access_key,
     )
     s3 = session.resource("s3", endpoint_url=endpoint_url)
     bucket = s3.Bucket(bucket_name)
@@ -95,29 +98,31 @@ def convert_geotiff_to_iiif(
         image.dzsave(
             dz_output_folder,
             layout="iiif",
-            suffix=".jpg",   # tile format (JPEG)
-            overlap=0,       # overlap in pixels between tiles
-            tile_size=256    # typical tile size for IIIF
+            suffix=".jpg",  # tile format (JPEG)
+            overlap=0,  # overlap in pixels between tiles
+            tile_size=256,  # typical tile size for IIIF
         )
         print(f"IIIF tiles created at: {dz_output_folder}")
 
         # Modify the info.json file to use the correct @id
         info_json_path = os.path.join(dz_output_folder, "info.json")
-        with open(info_json_path, 'r') as f:
+        with open(info_json_path, "r") as f:
             info_data = json.load(f)
-        
+
         # Update the @id with the correct URL using environment variables
-        info_data["@id"] = f"{os.getenv('AWS_IIIF_BASE_URL')}/{os.getenv('AWS_S3_PREFIX')}/{base_name}"
-        
+        info_data["@id"] = (
+            f"{os.getenv('AWS_IIIF_BASE_URL')}/{os.getenv('AWS_S3_PREFIX')}/{base_name}"
+        )
+
         sys.stdout.write(json.dumps(info_data, indent=2) + "\n")
 
         # Write the modified info.json back
-        with open(info_json_path, 'w') as f:
+        with open(info_json_path, "w") as f:
             json.dump(info_data, f, indent=2)
 
         # Upload the tile folder to S3
         print(f"Uploading tiles to s3://{bucket_name}/{s3_prefix} ...")
-        for root, dirs, files in os.walk(dz_output_folder):
+        for root, _, files in os.walk(dz_output_folder):
             for filename in files:
                 local_path = os.path.join(root, filename)
                 relative_path = os.path.relpath(local_path, output_dir)
@@ -128,8 +133,8 @@ def convert_geotiff_to_iiif(
                     s3_key,
                     ExtraArgs={
                         "ContentType": content_type_from_extension(filename),
-                        "ACL": "public-read"
-                    }
+                        "ACL": "public-read",
+                    },
                 )
         print("Upload complete.")
 
@@ -146,8 +151,12 @@ def convert_geotiff_to_iiif(
         iiif_base_url = f"https://{bucket_name}.s3.amazonaws.com"
 
     # Construct the full service ID for this image
-    image_service_id = f"{os.getenv('AWS_IIIF_BASE_URL')}/{os.getenv('AWS_S3_PREFIX')}/{base_name}"
-    
+    image_service_id = (
+        f"{os.getenv('AWS_IIIF_BASE_URL')}/"
+        f"{os.getenv('AWS_S3_PREFIX')}/"
+        f"{base_name}"
+    )
+
     # Create a level 0 compliant info.json
     info_data = {
         "@context": "http://iiif.io/api/image/2/context.json",
@@ -156,13 +165,8 @@ def convert_geotiff_to_iiif(
         "width": image.width,
         "height": image.height,
         "profile": ["http://iiif.io/api/image/2/level0.json"],
-        "sizes": [
-            {"width": image.width, "height": image.height}
-        ],
-        "tiles": [{
-            "width": 256,
-            "scaleFactors": [1]
-        }]
+        "sizes": [{"width": image.width, "height": image.height}],
+        "tiles": [{"width": 256, "scaleFactors": [1]}],
     }
 
     # Construct manifest with correct image service URLs
@@ -175,37 +179,41 @@ def convert_geotiff_to_iiif(
         "@type": "sc:Manifest",
         "@id": manifest_id,
         "label": title,
-        "metadata": [
-            {"label": "Creator", "value": creator}
-        ],
-        "sequences": [{
-            "@type": "sc:Sequence",
-            "canvases": [{
-                "@type": "sc:Canvas",
-                "@id": canvas_id,
-                "label": "p. 1",
-                "height": image.height,
-                "width": image.width,
-                "images": [{
-                    "@type": "oa:Annotation",
-                    "motivation": "sc:painting",
-                    "@id": image_annotation_id,
-                    "resource": {
-                        "@id": f"{image_service_id}/full/full/0/default.jpg",
-                        "@type": "dctypes:Image",
-                        "format": "image/jpeg",
+        "metadata": [{"label": "Creator", "value": creator}],
+        "sequences": [
+            {
+                "@type": "sc:Sequence",
+                "canvases": [
+                    {
+                        "@type": "sc:Canvas",
+                        "@id": canvas_id,
+                        "label": "p. 1",
                         "height": image.height,
                         "width": image.width,
-                        "service": {
-                            "@context": "http://iiif.io/api/image/2/context.json",
-                            "@id": image_service_id,
-                            "profile": "http://iiif.io/api/image/2/level0.json"
-                        }
-                    },
-                    "on": canvas_id
-                }]
-            }]
-        }]
+                        "images": [
+                            {
+                                "@type": "oa:Annotation",
+                                "motivation": "sc:painting",
+                                "@id": image_annotation_id,
+                                "resource": {
+                                    "@id": f"{image_service_id}/full/full/0/default.jpg",
+                                    "@type": "dctypes:Image",
+                                    "format": "image/jpeg",
+                                    "height": image.height,
+                                    "width": image.width,
+                                    "service": {
+                                        "@context": "http://iiif.io/api/image/2/context.json",
+                                        "@id": image_service_id,
+                                        "profile": "http://iiif.io/api/image/2/level0.json",
+                                    },
+                                },
+                                "on": canvas_id,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
     }
 
     # Save the manifest
@@ -222,25 +230,23 @@ def convert_geotiff_to_iiif(
     # 4) Save and upload the info.json and manifest.json to S3
     # ------------------------------------------------------------------
     # Upload info.json
-    info_json_s3_key = os.path.join(s3_prefix, base_name, "info.json").replace("\\", "/")
+    info_json_s3_key = os.path.join(s3_prefix, base_name, "info.json").replace(
+        "\\", "/"
+    )
     bucket.upload_file(
         info_json_path,
         info_json_s3_key,
-        ExtraArgs={
-            "ContentType": "application/json",
-            "ACL": "public-read"
-        }
+        ExtraArgs={"ContentType": "application/json", "ACL": "public-read"},
     )
 
     # Upload manifest.json
-    manifest_s3_key = os.path.join(s3_prefix, base_name, "manifest.json").replace("\\", "/")
+    manifest_s3_key = os.path.join(s3_prefix, base_name, "manifest.json").replace(
+        "\\", "/"
+    )
     bucket.upload_file(
         manifest_path,
         manifest_s3_key,
-        ExtraArgs={
-            "ContentType": "application/json",
-            "ACL": "public-read"
-        }
+        ExtraArgs={"ContentType": "application/json", "ACL": "public-read"},
     )
 
     print(f"IIIF Manifest uploaded to s3://{bucket_name}/{manifest_s3_key}")
@@ -249,8 +255,16 @@ def convert_geotiff_to_iiif(
     return manifest
 
 
-def content_type_from_extension(filename):
-    """Basic helper to guess Content-Type from file extension."""
+def content_type_from_extension(filename: str) -> str:
+    """
+    Basic helper to guess Content-Type from file extension.
+
+    Args:
+        filename: The name of the file including extension
+
+    Returns:
+        The MIME type as a string
+    """
     ext = filename.lower().rsplit(".", 1)[-1]
     if ext in ["jpg", "jpeg"]:
         return "image/jpeg"
@@ -266,23 +280,29 @@ def content_type_from_extension(filename):
 
 if __name__ == "__main__":
     # Set up argument parser
-    parser = argparse.ArgumentParser(description="Convert GeoTIFF to IIIF tiles and upload to S3.")
+    parser = argparse.ArgumentParser(
+        description="Convert GeoTIFF to IIIF tiles and upload to S3."
+    )
     parser.add_argument("input_geotiff", help="Path to the input GeoTIFF file.")
-    parser.add_argument("--tile_and_upload", action="store_true", help="Tile and upload images if set.")
+    parser.add_argument(
+        "--tile_and_upload", action="store_true", help="Tile and upload images if set."
+    )
     args = parser.parse_args()
 
     # Example usage
     # Adjust these variables to match your environment
     INPUT_GEOTIFF = args.input_geotiff
-    OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'output_tiles')
-    BUCKET_NAME = os.getenv('AWS_BUCKET_NAME', 'my-iiif-bucket')
-    AWS_S3_PREFIX = os.getenv('AWS_S3_PREFIX', 'my_geotiff')
-    AWS_IIIF_BASE_URL = os.getenv('AWS_IIIF_BASE_URL', 'https://my-iiif-bucket.s3.amazonaws.com/my_geotiff')
+    OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output_tiles")
+    BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "my-iiif-bucket")
+    AWS_S3_PREFIX = os.getenv("AWS_S3_PREFIX", "my_geotiff")
+    AWS_IIIF_BASE_URL = os.getenv(
+        "AWS_IIIF_BASE_URL", "https://my-iiif-bucket.s3.amazonaws.com/my_geotiff"
+    )
 
     # Load AWS credentials from .env file
-    AWS_ACCESS_KEY = os.getenv('AWS_ACCESS_KEY_ID')
-    AWS_SECRET_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-    REGION_NAME = os.getenv('AWS_REGION', 'us-east-1')
+    AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    REGION_NAME = os.getenv("AWS_REGION", "us-east-1")
 
     convert_geotiff_to_iiif(
         input_geotiff=INPUT_GEOTIFF,
@@ -295,5 +315,5 @@ if __name__ == "__main__":
         iiif_base_url=AWS_IIIF_BASE_URL,
         title="Sample GeoTIFF",
         creator="ACME Drones",
-        tile_and_upload=args.tile_and_upload
+        tile_and_upload=args.tile_and_upload,
     )
