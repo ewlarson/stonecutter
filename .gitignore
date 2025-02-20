@@ -171,8 +171,16 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Input files
+# Ignore everything in input_files and output_files
 input_files/*
-
-# Output files
 output_files/*
+
+# But keep .gitkeep files
+!input_files/.gitkeep
+!output_files/.gitkeep
+
+# Ignore all files in new_venv
+new_venv/*
+
+# But keep .gitkeep files
+!new_venv/.gitkeep
